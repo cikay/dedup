@@ -12,7 +12,7 @@ pipenv install
 
 Run the near-dedup pipeline:
 ```
-pipenv run python -m dedup.dedup --input data/test_sample.csv --output-dir data/datatrove_test
+pipenv run python -m dedup.dedup --input data/test_sample.csv --output-dir data/dedep_test
 ```
 
 Build a small, outlet-diverse test sample from a full corpus dump:
