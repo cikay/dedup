@@ -21,11 +21,29 @@ from datatrove.pipeline.dedup.minhash import (
     MinhashDedupFilter,
     MinhashDedupSignature,
 )
+from datatrove.pipeline.filters.lambda_filter import LambdaFilter
 from datatrove.pipeline.readers.csv import CsvReader
 from datatrove.pipeline.writers.jsonl import JsonlWriter
 from datatrove.utils.hashing import HashConfig
 
 from dedup.tokenizer import WhitespaceWordTokenizer
+
+CSV_COLUMNS = [
+    "lang",
+    "lang_score",
+    "publish_date",
+    "publisher",
+    "source_type",
+    "text",
+    "title",
+    "url",
+    "word_count",
+]
+
+
+def is_valid_data_row(doc) -> bool:
+    fields = {"text": doc.text, "url": doc.id, **doc.metadata}
+    return not all(fields.get(col) == col for col in CSV_COLUMNS)
 
 
 def get_reader(data_folder, glob_pattern):
@@ -38,6 +56,14 @@ def get_reader(data_folder, glob_pattern):
         text_key="text",
         id_key="url",
     )
+
+
+def get_corrupted_row_filter(exclusion_writer=None):
+    # Must run identically right after get_reader() in both the signature and
+    # filter stages, same reason as get_reader() above: it's a deterministic
+    # function of row content, so both reads drop the same rows in the same
+    # order and stay aligned.
+    return LambdaFilter(is_valid_data_row, exclusion_writer=exclusion_writer)
 
 
 def main():
@@ -61,6 +87,7 @@ def main():
     stage1 = LocalPipelineExecutor(
         pipeline=[
             get_reader(input_folder, glob_pattern),
+            get_corrupted_row_filter(exclusion_writer=JsonlWriter(f"{base}/removed_corrupted")),
             MinhashDedupSignature(
                 output_folder=f"{base}/signatures",
                 config=minhash_config,
@@ -101,6 +128,7 @@ def main():
     stage4 = LocalPipelineExecutor(
         pipeline=[
             get_reader(input_folder, glob_pattern),
+            get_corrupted_row_filter(),
             MinhashDedupFilter(
                 input_folder=f"{base}/remove_ids",
                 exclusion_writer=JsonlWriter(f"{base}/removed"),

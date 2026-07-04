@@ -12,6 +12,17 @@ DEFAULT_TARGETS = {
     "diq_Latn": 200,
 }
 
+# The real corpus has ~55 rows where every column's value equals its own
+# column name -- leftover header rows from concatenating scrape output files
+# (see dedup.dedup.is_valid_data_row). Injecting a few into the test sample
+# keeps that corruption reproducible in a small file instead of only ever
+# showing up in the full corpus.
+NUM_HEADER_ROWS = 3
+
+
+def make_header_row(fieldnames):
+    return {col: col for col in fieldnames}
+
 
 def collect_reservoirs(input_path, targets, rng):
     """Single streaming pass. Keeps a per-(lang, publisher) reservoir capped at
@@ -71,29 +82,14 @@ def round_robin_select(publisher_rows, target_count, rng):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Sample a small, outlet-diverse test set per language from output.csv"
-    )
-    parser.add_argument("--input", default="data/output.csv")
-    parser.add_argument("--output", default="data/test_sample.csv")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--target",
-        action="append",
-        metavar="LANG:COUNT",
-        help="Override a target, e.g. --target kmr_Latn:500 (repeatable)",
-    )
-    args = parser.parse_args()
-
     targets = dict(DEFAULT_TARGETS)
-    for spec in args.target or []:
-        lang, count = spec.split(":")
-        targets[lang] = int(count)
 
-    rng = random.Random(args.seed)
+    rng = random.Random(42)
+    input = "data/scrapy_final_data.csv"
+    output = "data/test_sample.csv"
 
-    print(f"[sample] Scanning {args.input} for {targets}...")
-    reservoirs = collect_reservoirs(args.input, targets, rng)
+    print(f"[sample] Scanning {input} for {targets}...")
+    reservoirs = collect_reservoirs(input, targets, rng)
 
     fieldnames = None
     all_selected = []
@@ -111,14 +107,17 @@ def main():
             fieldnames = list(selected[0].keys())
         all_selected.extend(selected)
 
+    all_selected.extend(make_header_row(fieldnames) for _ in range(NUM_HEADER_ROWS))
+    print(f"[sample] Injected {NUM_HEADER_ROWS} duplicated-header rows")
+
     rng.shuffle(all_selected)
 
-    with open(args.output, "w", encoding="utf-8", newline="") as f:
+    with open(output, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(all_selected)
 
-    print(f"[sample] Wrote {len(all_selected)} rows to {args.output}")
+    print(f"[sample] Wrote {len(all_selected)} rows to {output}")
 
 
 if __name__ == "__main__":
