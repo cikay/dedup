@@ -5,6 +5,8 @@ name = "pypi"
 
 [packages]
 datatrove = {extras = ["processing", "io"], version = "==0.9.0"}
+fasttext-numpy2-wheel = "*"
+huggingface-hub = "*"
 
 [dev-packages]
 pytest = "*"

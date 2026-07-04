@@ -26,6 +26,11 @@ pipenv run python dedup/check_max_field_length.py data/output.csv
 pipenv run python dedup/check_row_shape.py data/output.csv
 ```
 
+Re-run language ID (the same GlotLID model used at scrape time in the sibling `sorjin_scrapy` project) against a `deduped/` output, overwriting `lang`/`lang_score` in place:
+```
+pipenv run python -m dedup.relabel_lang data/dedep_test/deduped
+```
+
 Run tests:
 ```
 pipenv run pytest
