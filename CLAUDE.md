@@ -19,16 +19,18 @@ pipenv run pytest tests/test_tokenizer.py::test_lowercases
 
 ## Architecture
 
-**`dedup/dedup.py`** is the core pipeline. It runs datatrove's MinHash near-dedup algorithm as four sequential `LocalPipelineExecutor` stages, each depending on the previous:
+**`dedup/dedup.py`** is the core pipeline. It first drops exact-duplicate rows cheaply with datatrove's `ExactDedup*` stages, then runs datatrove's MinHash near-dedup algorithm — six sequential `LocalPipelineExecutor` stages total, each depending on the previous:
 
-1. `MinhashDedupSignature` — compute MinHash signatures per document
-2. `MinhashDedupBuckets` — bucket documents by signature (`tasks=minhash_config.num_buckets`)
-3. `MinhashDedupCluster` — cluster near-duplicate buckets, records which doc IDs to remove
-4. `MinhashDedupFilter` — re-read the input and split into `deduped/` and `removed/` based on stage 3's output
+1. `ExactDedupSignature` — hash each document's full text (`exact_dedup_config`, `content_getter=get_doc_content`)
+2. `ExactFindDedups` — single-worker pass over those hashes, records which doc IDs are exact duplicates
+3. `MinhashDedupSignature` — re-read the input, drop stage-2's exact dupes (`get_exact_dedup_filter`), compute MinHash signatures per remaining document
+4. `MinhashDedupBuckets` — bucket documents by signature (`tasks=minhash_config.num_buckets`)
+5. `MinhashDedupCluster` — cluster near-duplicate buckets, records which doc IDs to remove
+6. `MinhashDedupFilter` — re-read the input again, drop the same exact dupes, and split into `deduped/` and `removed/` based on stage 5's output
 
 `MinhashConfig` params (`n_grams=5, num_buckets=14, hashes_per_bucket=8`) mirror datatrove's own `fineweb.py` MinHash example, kept deliberately identical for comparability.
 
-Important invariant: the CSV reader config (`get_reader`, using `text_key="text"`, `id_key="url"`) must be identical between stage 1 and stage 4 — `MinhashDedupFilter` matches removals by `(rank, doc index within that rank)`, not by content, so the two reads have to line up exactly.
+Important invariant: `get_reader()` + `get_corrupted_row_filter()` + `get_exact_dedup_filter()` must be reapplied identically (same order, same args modulo `exclusion_writer`) on every re-read of the input — stage 3 (minhash signature) and stage 6 (minhash filter) both re-read the raw CSV from scratch, and `MinhashDedupFilter` matches removals by `(rank, doc index within that rank)`, not by content, so all reads have to line up exactly. The exact-dedup signatures (stage 1) are likewise computed over the `get_reader()` + `get_corrupted_row_filter()` stream, so `get_exact_dedup_filter()`'s doc indices only make sense applied right after that same pair, in that same order, in stages 3 and 6.
 
 **`dedup/tokenizer.py`** — `WhitespaceWordTokenizer`, a custom `datatrove.utils.word_tokenizers.WordTokenizer` implementation. Needed because datatrove's tokenizer registry has no entry for `kmr_Latn` / `ckb_Arab` / `diq_Latn`. All three are whitespace-delimited scripts, so a plain whitespace split (after lowercasing and stripping punctuation via `\w`/`\s` matching, which works across both Latin and Arabic script) is sufficient for MinHash word-shingling. Only `word_tokenize` is implemented; `sent_tokenize`/`span_tokenize` raise `NotImplementedError` since sentence splitting isn't used by the dedup stages, and only exist to satisfy the abstract base class.
 

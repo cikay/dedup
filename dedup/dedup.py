@@ -1,6 +1,8 @@
 """Near-dedup pipeline mirroring datatrove's fineweb.py MinHash example, run
 entirely on a single machine (LocalPipelineExecutor) against a small sample
-(see sample_test_data.py).
+(see sample_test_data.py). An exact-dedup pass (datatrove's ExactDedup*
+stages) runs first to drop identical-text rows cheaply, before the more
+expensive MinHash near-dedup stages see them.
 
 Usage (run from the repo root):
     pipenv run python -m dedup.dedup --input data/test_sample.csv --output-dir data/datatrove_test
@@ -14,6 +16,12 @@ import csv
 csv.field_size_limit(472_327)  # detected by check_max_field_length.py
 
 from datatrove.executor.local import LocalPipelineExecutor
+from datatrove.pipeline.dedup.exact_dedup import (
+    ExactDedupConfig,
+    ExactDedupFilter,
+    ExactDedupSignature,
+    ExactFindDedups,
+)
 from datatrove.pipeline.dedup.minhash import (
     MinhashConfig,
     MinhashDedupBuckets,
@@ -66,6 +74,30 @@ def get_corrupted_row_filter(exclusion_writer=None):
     return LambdaFilter(is_valid_data_row, exclusion_writer=exclusion_writer)
 
 
+def get_doc_content(doc) -> str:
+    return doc.text
+
+
+# Shared by the exact-dedup signature stage and every later re-read of the
+# input (minhash signature + minhash filter stages) that needs to reproduce
+# the same exact-duplicate decisions.
+exact_dedup_config = ExactDedupConfig(content_getter=get_doc_content)
+
+
+def get_exact_dedup_filter(exact_duplicates_folder, exclusion_writer=None):
+    # Like get_corrupted_row_filter(), must run identically (same input
+    # position) in both the minhash signature stage and the minhash filter
+    # stage, right after get_reader() + get_corrupted_row_filter() -- the
+    # exact-dedup signatures were computed over that same filtered stream, so
+    # doc indices only line up if both re-reads apply the identical filters
+    # in the identical order.
+    return ExactDedupFilter(
+        data_folder=exact_duplicates_folder,
+        config=exact_dedup_config,
+        exclusion_writer=exclusion_writer,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="datatrove MinHash near-dedup test pipeline")
     parser.add_argument("--input", default="data/test_sample.csv")
@@ -84,10 +116,40 @@ def main():
     )
     tokenizer = WhitespaceWordTokenizer()
 
-    stage1 = LocalPipelineExecutor(
+    stage_exact_sig = LocalPipelineExecutor(
         pipeline=[
             get_reader(input_folder, glob_pattern),
             get_corrupted_row_filter(exclusion_writer=JsonlWriter(f"{base}/removed_corrupted")),
+            ExactDedupSignature(
+                output_folder=f"{base}/exact_signatures",
+                config=exact_dedup_config,
+            ),
+        ],
+        tasks=1,
+        logging_dir=f"{base}/logs/exact_signatures",
+    )
+
+    stage_exact_find = LocalPipelineExecutor(
+        pipeline=[
+            ExactFindDedups(
+                data_folder=f"{base}/exact_signatures",
+                output_folder=f"{base}/exact_duplicates",
+                config=exact_dedup_config,
+            ),
+        ],
+        tasks=1,
+        logging_dir=f"{base}/logs/exact_find",
+        depends=stage_exact_sig,
+    )
+
+    stage1 = LocalPipelineExecutor(
+        pipeline=[
+            get_reader(input_folder, glob_pattern),
+            get_corrupted_row_filter(),
+            get_exact_dedup_filter(
+                f"{base}/exact_duplicates",
+                exclusion_writer=JsonlWriter(f"{base}/removed_exact_dupes"),
+            ),
             MinhashDedupSignature(
                 output_folder=f"{base}/signatures",
                 config=minhash_config,
@@ -96,6 +158,7 @@ def main():
         ],
         tasks=1,
         logging_dir=f"{base}/logs/signatures",
+        depends=stage_exact_find,
     )
 
     stage2 = LocalPipelineExecutor(
@@ -129,6 +192,7 @@ def main():
         pipeline=[
             get_reader(input_folder, glob_pattern),
             get_corrupted_row_filter(),
+            get_exact_dedup_filter(f"{base}/exact_duplicates"),
             MinhashDedupFilter(
                 input_folder=f"{base}/remove_ids",
                 exclusion_writer=JsonlWriter(f"{base}/removed"),
@@ -142,8 +206,9 @@ def main():
     )
 
     stage4.run()
-    print(f"\n[datatrove] Kept articles:   {base}/deduped/")
-    print(f"[datatrove] Removed dupes:   {base}/removed/")
+    print(f"\n[datatrove] Kept articles:    {base}/deduped/")
+    print(f"[datatrove] Removed dupes:    {base}/removed/")
+    print(f"[datatrove] Removed exact:    {base}/removed_exact_dupes/")
     print(f"[datatrove] Cluster metadata: {base}/remove_ids/")
 
 
