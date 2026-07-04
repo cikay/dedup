@@ -34,6 +34,7 @@ from datatrove.pipeline.readers.csv import CsvReader
 from datatrove.pipeline.writers.jsonl import JsonlWriter
 from datatrove.utils.hashing import HashConfig
 
+from dedup.text_normalizer import NFCNormalizer
 from dedup.tokenizer import WhitespaceWordTokenizer
 
 CSV_COLUMNS = [
@@ -72,6 +73,14 @@ def get_corrupted_row_filter(exclusion_writer=None):
     # function of row content, so both reads drop the same rows in the same
     # order and stay aligned.
     return LambdaFilter(is_valid_data_row, exclusion_writer=exclusion_writer)
+
+
+def get_text_normalizer():
+    # Must run identically right after get_reader() in every re-read (exact-
+    # dedup signature, minhash signature, minhash filter): it rewrites doc.text
+    # in place before get_doc_content() / the tokenizer ever see it, so all
+    # downstream hashing is computed over the same canonicalized text.
+    return NFCNormalizer()
 
 
 def get_doc_content(doc) -> str:
@@ -119,6 +128,7 @@ def main():
     stage_exact_sig = LocalPipelineExecutor(
         pipeline=[
             get_reader(input_folder, glob_pattern),
+            get_text_normalizer(),
             get_corrupted_row_filter(exclusion_writer=JsonlWriter(f"{base}/removed_corrupted")),
             ExactDedupSignature(
                 output_folder=f"{base}/exact_signatures",
@@ -145,6 +155,7 @@ def main():
     stage1 = LocalPipelineExecutor(
         pipeline=[
             get_reader(input_folder, glob_pattern),
+            get_text_normalizer(),
             get_corrupted_row_filter(),
             get_exact_dedup_filter(
                 f"{base}/exact_duplicates",
@@ -191,6 +202,7 @@ def main():
     stage4 = LocalPipelineExecutor(
         pipeline=[
             get_reader(input_folder, glob_pattern),
+            get_text_normalizer(),
             get_corrupted_row_filter(),
             get_exact_dedup_filter(f"{base}/exact_duplicates"),
             MinhashDedupFilter(
